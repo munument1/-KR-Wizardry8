@@ -1,0 +1,102 @@
+name: Create v0.2.8 empty releases
+
+on:
+  push:
+    branches:
+      - release-v0.2.8-publisher
+    paths:
+      - release-payload/CREATE_RELEASES
+
+permissions:
+  contents: write
+
+jobs:
+  create-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare notes
+        shell: bash
+        run: |
+          cat > notes-124.md <<'EOF'
+          # Wizardry 8 한국어 패치 v0.2.8 — 1.24
+
+          Wizardry 8 **1.24**용 저널 표기/글꼴 수정 릴리스입니다.
+
+          ## 변경 내용
+
+          - 저널에서 종족/고유명사 `Mook`가 `묵`으로 번역되던 16개 슬롯을 `Mook`로 통일했습니다.
+          - `FACT.DBS`에서 Mook 관련 저널 필드만 변경했고, 저널 필드 외 데이터 변경은 0건입니다.
+          - v0.2.7에서 갈무리9 교체 대상에서 빠져 있던 `Data/JOURNAL/journal_font.sti`를 수정했습니다.
+          - 저널 한글 1,196개 글리프를 갈무리9 기반 픽셀 형태로 교체하고 라틴 문자 기준선에 맞춰 재배치했습니다.
+          - 비한글 2,103개 글리프의 ETRLE 압축 데이터는 v0.2.7과 동일하게 유지했습니다.
+
+          ## 검증
+
+          - Mook 관련 저널 항목 전체에서 `묵` 잔존 0건
+          - `FACT.DBS` 저널 필드 외 변경 0건
+          - `journal_font.sti` 3,299개 프레임 전체 ETRLE 재해독 통과
+          - 1.24 / 1.28의 수정 `FACT.DBS`, `journal_font.sti` 바이트 단위 동일 확인
+          - ZIP CRC 및 SHA-256 검증 완료
+
+          ## 다운로드
+
+          `Wizardry8_KoreanPatch_1.24_JournalFix_v0.2.8.zip`
+
+          SHA-256: `34D876B606AAD2F6610B20701DE45A35600A306F07F4F995D96BE3C1B8ED7DC4`
+
+          압축 내용물을 Wizardry 8 게임 폴더에 덮어씁니다. 설치 전 게임 폴더와 세이브를 백업하세요.
+          EOF
+
+          cat > notes-128.md <<'EOF'
+          # Wizardry 8 한국어 패치 v0.2.8 — Fan Patch 1.28
+
+          Fan Patch **1.28 build 6735**용 저널 표기/글꼴 수정 릴리스입니다.
+
+          ## 변경 내용
+
+          - 저널에서 종족/고유명사 `Mook`가 `묵`으로 번역되던 16개 슬롯을 `Mook`로 통일했습니다.
+          - `FACT.DBS`에서 Mook 관련 저널 필드만 변경했고, 저널 필드 외 데이터 변경은 0건입니다.
+          - v0.2.7에서 갈무리9 교체 대상에서 빠져 있던 `Data/JOURNAL/journal_font.sti`를 수정했습니다.
+          - 저널 한글 1,196개 글리프를 갈무리9 기반 픽셀 형태로 교체하고 라틴 문자 기준선에 맞춰 재배치했습니다.
+          - 비한글 2,103개 글리프의 ETRLE 압축 데이터는 v0.2.7과 동일하게 유지했습니다.
+
+          ## 검증
+
+          - Mook 관련 저널 항목 전체에서 `묵` 잔존 0건
+          - `FACT.DBS` 저널 필드 외 변경 0건
+          - `journal_font.sti` 3,299개 프레임 전체 ETRLE 재해독 통과
+          - 1.24 / 1.28의 수정 `FACT.DBS`, `journal_font.sti` 바이트 단위 동일 확인
+          - ZIP CRC 및 SHA-256 검증 완료
+
+          ## 다운로드
+
+          `Wizardry8_KoreanPatch_1.28_JournalFix_v0.2.8.zip`
+
+          SHA-256: `7D2A892DB90CE75E51C6B122A78DFBFDF4A2D55A70939E2DD9DD07C379DDF254`
+
+          Fan Patch 1.28에서는 런처 언어를 **ENG**로 두고 `Wiz8_v128.exe`를 실행하세요.
+          EOF
+
+      - name: Create or update 1.24 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag='0.2.8(1.24)'
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title 'Wizardry 8 (1.24) 한국어 패치 v0.2.8' --notes-file notes-124.md
+          else
+            gh release create "$tag" --target main --title 'Wizardry 8 (1.24) 한국어 패치 v0.2.8' --notes-file notes-124.md
+          fi
+
+      - name: Create or update 1.28 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag='v0.2.8'
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title 'Wizardry 8 (1.28.6735) 한국어 패치 v0.2.8' --notes-file notes-128.md
+          else
+            gh release create "$tag" --target main --title 'Wizardry 8 (1.28.6735) 한국어 패치 v0.2.8' --notes-file notes-128.md
+          fi
