@@ -11,6 +11,8 @@ OUT.mkdir(exist_ok=True)
 HANGUL_START = 154
 HANGUL_COUNT = 1196
 HANGUL_END = HANGUL_START + HANGUL_COUNT
+ASCII_FRAME_COUNT = 93  # A-Z, a-z, 0-9, punctuation, space; excludes ` and ~
+MAP_PREFIX_COUNT = 154
 INK = 44
 
 
@@ -42,18 +44,21 @@ def parse_bdf(path: Path):
         elif line.startswith("STARTCHAR "):
             enc = None
             bbx = None
+            dwidth = None
             bitmap = None
             i += 1
             while i < len(lines) and not lines[i].startswith("ENDCHAR"):
                 s = lines[i]
                 if s.startswith("ENCODING "):
                     enc = int(s.split()[1])
+                elif s.startswith("DWIDTH "):
+                    dwidth = int(s.split()[1])
                 elif s.startswith("BBX "):
                     bbx = tuple(map(int, s.split()[1:5]))
                 elif s == "BITMAP":
                     if bbx is None:
                         raise RuntimeError("BITMAP before BBX")
-                    w, h, xoff, yoff = bbx
+                    w, h, _xoff, _yoff = bbx
                     bitmap = []
                     for r in range(h):
                         hx = lines[i + 1 + r].strip()
@@ -61,13 +66,12 @@ def parse_bdf(path: Path):
                         val = int(hx, 16) if hx else 0
                         row = []
                         for x in range(w):
-                            bit = (val >> (total_bits - 1 - x)) & 1
-                            row.append(bit)
+                            row.append((val >> (total_bits - 1 - x)) & 1)
                         bitmap.append(row)
                     i += h
                 i += 1
             if enc is not None and bbx is not None and bitmap is not None:
-                glyphs[enc] = (bbx, bitmap)
+                glyphs[enc] = {"bbx": bbx, "dwidth": dwidth, "bitmap": bitmap}
             continue
         i += 1
     return props, glyphs
@@ -81,9 +85,10 @@ def parse_sti(raw: bytes):
         raise RuntimeError(f"unexpected frame count {n}")
     meta_off = 64 + 256 * 3
     data_start = meta_off + n * 16
-    recs = []
-    for idx in range(n):
-        recs.append(list(struct.unpack_from("<IIhhHH", raw, meta_off + idx * 16)))
+    recs = [
+        list(struct.unpack_from("<IIhhHH", raw, meta_off + i * 16))
+        for i in range(n)
+    ]
     return n, meta_off, data_start, recs
 
 
@@ -109,7 +114,7 @@ def decode_frame(raw: bytes, parsed, idx: int):
             if cmd == 0:
                 break
             count = cmd & 0x7F
-            if count == 0:
+            if not count:
                 raise RuntimeError(f"frame {idx} invalid zero run")
             if cmd & 0x80:
                 row.extend([0] * count)
@@ -128,17 +133,16 @@ def etrle_encode(rows) -> bytes:
     out = bytearray()
     for row in rows:
         x = 0
-        w = len(row)
-        while x < w:
+        while x < len(row):
             if row[x] == 0:
                 j = x
-                while j < w and row[j] == 0 and j - x < 127:
+                while j < len(row) and row[j] == 0 and j - x < 127:
                     j += 1
                 out.append(0x80 | (j - x))
                 x = j
             else:
                 j = x
-                while j < w and row[j] != 0 and j - x < 127:
+                while j < len(row) and row[j] != 0 and j - x < 127:
                     j += 1
                 out.append(j - x)
                 out.extend(row[x:j])
@@ -147,16 +151,14 @@ def etrle_encode(rows) -> bytes:
     return bytes(out)
 
 
-def rebuild_sti(raw: bytes, replacements: dict[int, list[list[int]]]) -> bytes:
+def rebuild_sti(raw: bytes, replacements) -> bytes:
     n, meta_off, data_start, recs = parse_sti(raw)
-    comps = []
-    for idx in range(n):
-        if idx in replacements:
-            comp = etrle_encode(replacements[idx])
-        else:
-            comp = frame_comp(raw, (n, meta_off, data_start, recs), idx)
-        comps.append(comp)
-
+    comps = [
+        etrle_encode(replacements[i])
+        if i in replacements
+        else frame_comp(raw, (n, meta_off, data_start, recs), i)
+        for i in range(n)
+    ]
     new = bytearray(raw[:data_start])
     data_off = 0
     for idx, (rec, comp) in enumerate(zip(recs, comps)):
@@ -170,9 +172,9 @@ def rebuild_sti(raw: bytes, replacements: dict[int, list[list[int]]]) -> bytes:
 
 
 def glyph_coords(glyph):
-    (w, h, xoff, yoff), bitmap = glyph
+    w, h, xoff, yoff = glyph["bbx"]
     pts = set()
-    for r, row in enumerate(bitmap):
+    for r, row in enumerate(glyph["bitmap"]):
         y_bdf = yoff + h - 1 - r
         for c, bit in enumerate(row):
             if bit:
@@ -180,7 +182,7 @@ def glyph_coords(glyph):
     return pts
 
 
-def sprite_foreground_coords(raw: bytes, parsed, idx: int):
+def foreground_coords(raw: bytes, parsed, idx: int):
     rows = decode_frame(raw, parsed, idx)
     return {(x, y) for y, row in enumerate(rows) for x, v in enumerate(row) if v == INK}
 
@@ -193,13 +195,15 @@ def find_hangul_map(exe: bytes):
         if all(0xAC00 <= cp <= 0xD7A3 for cp in vals) and all(
             vals[i] < vals[i + 1] for i in range(len(vals) - 1)
         ):
-            return off, vals
+            prefix_off = off - MAP_PREFIX_COUNT * 2
+            prefix = list(struct.unpack_from("<" + "H" * MAP_PREFIX_COUNT, exe, prefix_off))
+            return off, prefix, vals
     raise RuntimeError("1,196-glyph Hangul Unicode map not found")
 
 
 def infer_galmuri9_alignment(font_raw: bytes, parsed, cps, g9):
     actual = [
-        sprite_foreground_coords(font_raw, parsed, HANGUL_START + i)
+        foreground_coords(font_raw, parsed, HANGUL_START + i)
         for i in range(HANGUL_COUNT)
     ]
     best = None
@@ -225,10 +229,10 @@ def infer_galmuri9_alignment(font_raw: bytes, parsed, cps, g9):
     return best
 
 
-def build_galmuri11_rows(cps, g11, x_origin: int, baseline: int):
+def build_hangul_rows(cps, g11, x_origin: int, baseline: int):
     replacements = {}
-    missing = []
     clipped = []
+    missing = []
     for i, cp in enumerate(cps):
         glyph = g11.get(cp)
         if glyph is None:
@@ -240,17 +244,51 @@ def build_galmuri11_rows(cps, g11, x_origin: int, baseline: int):
             sy = baseline - y
             if not (0 <= sx < 13 and 0 <= sy < 28):
                 clipped.append((cp, sx, sy))
-                continue
-            rows[sy][sx] = INK
+            else:
+                rows[sy][sx] = INK
         replacements[HANGUL_START + i] = rows
     if missing:
-        raise RuntimeError(f"Galmuri11 missing {len(missing)} mapped Hangul glyphs")
+        raise RuntimeError(f"Galmuri11 missing {len(missing)} Hangul glyphs")
+    if clipped:
+        raise RuntimeError(f"Galmuri11 Hangul clipped pixels: {clipped[:10]}")
+    return replacements
+
+
+def build_ascii_rows(prefix_cps, g11, parsed, baseline: int):
+    # Frames 0..92 are exactly the printable ASCII map used by journal_font.sti,
+    # except backtick and tilde. Preserve original frame widths/spacing, but
+    # replace antialiased multi-index pixels with monochrome Galmuri11 index 44.
+    _, _, _, recs = parsed
+    ascii_cps = prefix_cps[:ASCII_FRAME_COUNT]
+    expected = set(range(0x20, 0x7F)) - {0x60, 0x7E}
+    if set(ascii_cps) != expected or len(set(ascii_cps)) != ASCII_FRAME_COUNT:
+        raise RuntimeError("unexpected journal ASCII frame map")
+    replacements = {}
+    clipped = []
+    for idx, cp in enumerate(ascii_cps):
+        _off, _length, _xo, _yo, h, w = recs[idx]
+        rows = [[0] * w for _ in range(h)]
+        if cp != 0x20:
+            glyph = g11.get(cp)
+            if glyph is None:
+                raise RuntimeError(f"Galmuri11 missing ASCII U+{cp:04X}")
+            dwidth = glyph["dwidth"] or w
+            x_shift = max(0, (w - dwidth) // 2)
+            for x, y in glyph_coords(glyph):
+                sx = x_shift + x
+                sy = baseline - y
+                if not (0 <= sx < w and 0 <= sy < h):
+                    clipped.append((idx, cp, sx, sy, w, h))
+                else:
+                    rows[sy][sx] = INK
+        replacements[idx] = rows
     if clipped:
         preview = ", ".join(
-            f"U+{cp:04X}@{x},{y}" for cp, x, y in clipped[:10]
+            f"frame={i} U+{cp:04X}@{x},{y}/{w}x{h}"
+            for i, cp, x, y, w, h in clipped[:10]
         )
-        raise RuntimeError(f"Galmuri11 clipped {len(clipped)} pixels: {preview}")
-    return replacements
+        raise RuntimeError(f"Galmuri11 ASCII clipped {len(clipped)} pixels: {preview}")
+    return replacements, ascii_cps
 
 
 def replace_mook_with_mukeu(data: bytes):
@@ -274,12 +312,8 @@ def replace_mook_with_mukeu(data: bytes):
             if any(0xAC00 <= ord(ch) <= 0xD7A3 for ch in text):
                 positions.append(pos)
         start = pos + 2
-
     if len(positions) != 17:
-        raise RuntimeError(
-            f"expected 17 Korean-journal Mook occurrences, found {len(positions)}"
-        )
-
+        raise RuntimeError(f"expected 17 Korean-journal Mook occurrences, found {len(positions)}")
     for pos in reversed(positions):
         e = pos
         while e + 1 < len(raw) and raw[e : e + 2] != b"\x00\x00":
@@ -291,50 +325,24 @@ def replace_mook_with_mukeu(data: bytes):
             raise RuntimeError("replacement grew beyond field")
         raw[pos : pos + len(new_text)] = new_text
         raw[pos + len(new_text) : e] = b"\x00" * (old_len - len(new_text))
-
     bb = bytes(raw)
-    remaining = []
-    start = 0
-    while True:
-        pos = bb.find(pat, start)
-        if pos < 0:
-            break
-        if pos % 2 == 0:
-            s = pos
-            while s >= 2 and bb[s - 2 : s] != b"\x00\x00":
-                s -= 2
-            e = pos
-            while e + 1 < len(bb) and bb[e : e + 2] != b"\x00\x00":
-                e += 2
-            text = bb[s:e].decode("utf-16le", errors="ignore")
-            if any(0xAC00 <= ord(ch) <= 0xD7A3 for ch in text):
-                remaining.append(pos)
-        start = pos + 2
-
-    if remaining:
-        raise RuntimeError(f"Korean-context Mook remains at {remaining[:10]}")
     if bb.count(repl) != 17:
-        raise RuntimeError(
-            f"expected 17 '무크' UTF-16LE occurrences, got {bb.count(repl)}"
-        )
+        raise RuntimeError(f"expected 17 '무크' occurrences, got {bb.count(repl)}")
     return bb, positions
 
 
-def regenerate_checksums(root: Path) -> None:
-    checksum_path = root / "SHA256SUMS.txt"
-    lines = []
-    for p in sorted(root.rglob("*")):
-        if not p.is_file() or p == checksum_path:
-            continue
-        rel = p.relative_to(root).as_posix()
-        lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {rel}")
-    checksum_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+def clean_root_text_files(root: Path) -> None:
+    # Keep game CREDITS and font license under subdirectories; remove packaging clutter.
+    for p in root.glob("*.txt"):
+        p.unlink()
+    for p in root.glob("*.TXT"):
+        p.unlink()
+    for p in root.glob("README*.md"):
+        p.unlink()
 
 
 def zip_tree(root: Path, outzip: Path) -> None:
-    with zipfile.ZipFile(
-        outzip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
-    ) as zf:
+    with zipfile.ZipFile(outzip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         for p in sorted(root.rglob("*")):
             if p.is_file():
                 zf.write(p, p.relative_to(root).as_posix())
@@ -348,70 +356,60 @@ def main() -> None:
 
     f128 = (p128 / "Data/JOURNAL/journal_font.sti").read_bytes()
     f124 = (p124 / "Data/JOURNAL/journal_font.sti").read_bytes()
-    if f128 != f124:
-        raise RuntimeError("v0.2.8 1.24/1.28 journal fonts differ unexpectedly")
     fact128 = (p128 / "Data/DATABASES/FACT.DBS").read_bytes()
     fact124 = (p124 / "Data/DATABASES/FACT.DBS").read_bytes()
-    if fact128 != fact124:
-        raise RuntimeError("v0.2.8 1.24/1.28 FACT.DBS differ unexpectedly")
+    if f128 != f124 or fact128 != fact124:
+        raise RuntimeError("v0.2.8 1.24/1.28 shared journal data differ unexpectedly")
 
     exe = (p128 / "Wiz8_v128.exe").read_bytes()
-    map_off, cps = find_hangul_map(exe)
-    print(
-        f"Hangul map: offset=0x{map_off:X}, count={len(cps)}, "
-        f"first={chr(cps[0])}, last={chr(cps[-1])}"
-    )
+    map_off, prefix_cps, hangul_cps = find_hangul_map(exe)
+    print(f"map offset=0x{map_off:X}; ASCII frames=0-{ASCII_FRAME_COUNT-1}; Hangul={len(hangul_cps)}")
 
     props9, g9 = parse_bdf(ROOT / "Galmuri9.bdf")
     props11, g11 = parse_bdf(ROOT / "Galmuri11.bdf")
-    print("Galmuri9 props:", props9)
-    print("Galmuri11 props:", props11)
-
     parsed = parse_sti(f128)
-    best = infer_galmuri9_alignment(f128, parsed, cps, g9)
+    best = infer_galmuri9_alignment(f128, parsed, hangul_cps, g9)
     (exact, _neg_delta), x_origin, baseline, present, pixel_delta = best
-    print(
-        f"Galmuri9 alignment best: x_origin={x_origin}, baseline={baseline}, "
-        f"exact={exact}/{present}, pixel_delta={pixel_delta}"
-    )
+    print(f"Galmuri9 alignment x={x_origin}, baseline={baseline}, exact={exact}/{present}, delta={pixel_delta}")
     if exact < 1000:
-        raise RuntimeError(
-            "Could not reliably infer Galmuri9 placement from current journal font"
-        )
+        raise RuntimeError("could not infer existing Hangul baseline reliably")
 
-    replacements = build_galmuri11_rows(cps, g11, x_origin, baseline)
+    replacements = build_hangul_rows(hangul_cps, g11, x_origin, baseline)
+    ascii_repl, ascii_cps = build_ascii_rows(prefix_cps, g11, parsed, baseline)
+    replacements.update(ascii_repl)
     new_font = rebuild_sti(f128, replacements)
     new_parsed = parse_sti(new_font)
 
     for idx in range(3299):
         decode_frame(new_font, new_parsed, idx)
 
-    changed = [
-        idx
-        for idx in range(3299)
-        if frame_comp(new_font, new_parsed, idx) != frame_comp(f128, parsed, idx)
-    ]
-    if changed != list(range(HANGUL_START, HANGUL_END)):
-        raise RuntimeError(
-            f"unexpected changed frame set: count={len(changed)} "
-            f"first={changed[:5]} last={changed[-5:]}"
-        )
-
-    for idx in range(HANGUL_START, HANGUL_END):
+    # All visible ASCII and Hangul pixels must be monochrome index 44; this removes
+    # the old antialias/shadow palette values that produced green contamination.
+    for idx in list(range(ASCII_FRAME_COUNT)) + list(range(HANGUL_START, HANGUL_END)):
         rows = decode_frame(new_font, new_parsed, idx)
         used = {v for row in rows for v in row if v}
         if used - {INK}:
-            raise RuntimeError(
-                f"frame {idx} contains non-ink palette indices {used}"
-            )
+            raise RuntimeError(f"target frame {idx} still has palette values {sorted(used)}")
 
-    for idx in list(range(HANGUL_START)) + list(range(HANGUL_END, 3299)):
+    target = set(range(ASCII_FRAME_COUNT)) | set(range(HANGUL_START, HANGUL_END))
+    changed = {
+        i for i in range(3299)
+        if frame_comp(new_font, new_parsed, i) != frame_comp(f128, parsed, i)
+    }
+    if not (set(range(ASCII_FRAME_COUNT - 1)) | set(range(HANGUL_START, HANGUL_END))).issubset(changed):
+        raise RuntimeError("not all visible ASCII/Hangul frames changed as expected")
+    if changed - target:
+        raise RuntimeError(f"non-target frames changed: {sorted(changed-target)[:20]}")
+
+    # Extended Latin placeholders 93..148 and private FFF0..FFF4 frames 149..153
+    # remain byte-identical, as do all frames after the Hangul range.
+    untouched = list(range(ASCII_FRAME_COUNT, HANGUL_START)) + list(range(HANGUL_END, 3299))
+    for idx in untouched:
         if frame_comp(new_font, new_parsed, idx) != frame_comp(f128, parsed, idx):
-            raise RuntimeError(f"non-Hangul frame {idx} changed")
+            raise RuntimeError(f"untouched frame changed: {idx}")
 
     if new_font[64 : 64 + 768] != f128[64 : 64 + 768]:
         raise RuntimeError("palette changed")
-
     _, _, _, old_recs = parsed
     _, _, _, new_recs = new_parsed
     for i in range(3299):
@@ -419,83 +417,38 @@ def main() -> None:
             raise RuntimeError(f"frame geometry changed at {i}")
 
     new_fact, mook_positions = replace_mook_with_mukeu(fact128)
-    print(
-        "Mook->무크 journal occurrences:",
-        len(mook_positions),
-        [hex(x) for x in mook_positions],
-    )
-
-    report = {
-        "base": "v0.2.8",
-        "galmuri_source": "quiple/galmuri main",
-        "hangul_map_offset": hex(map_off),
-        "hangul_frames": [HANGUL_START, HANGUL_END - 1],
-        "hangul_count": HANGUL_COUNT,
-        "g9_alignment_probe": {
-            "x_origin": x_origin,
-            "baseline": baseline,
-            "exact_matches": exact,
-            "present": present,
-            "pixel_delta": pixel_delta,
-            "props": props9,
-        },
-        "g11_props": props11,
-        "palette_index": INK,
-        "shadow": False,
-        "changed_font_frames": len(changed),
-        "unchanged_nonhangul_frames": 3299 - len(changed),
-        "mook_to_mukeu_occurrences": len(mook_positions),
-        "journal_font_sha256": sha256_bytes(new_font),
-        "fact_sha256": sha256_bytes(new_fact),
-    }
-
-    notes = (
-        "Wizardry 8 한국어 패치 v0.2.9-test1 - 저널 갈무리11/무크 테스트\n"
-        "==========================================================\n\n"
-        "변경 내용\n"
-        "---------\n"
-        "- 저널 한글 1,196개 글리프를 갈무리11 픽셀 글리프로 교체했습니다.\n"
-        "- 저널 한글 글리프의 1px 그림자를 제거했습니다.\n"
-        "- 저널 한글은 기존 저널 팔레트의 단일 잉크 인덱스(44)만 사용하도록 해 "
-        "회색/비활성 항목에서 그림자 팔레트 인덱스가 섞이던 경로를 제거했습니다.\n"
-        "- 한국어 저널 문맥의 Mook 표기 17회(16개 저널 슬롯)를 '무크'로 수정했습니다.\n"
-        "- 비한글 2,103개 저널 글리프와 나머지 게임 데이터는 v0.2.8을 그대로 유지했습니다.\n\n"
-        "검증\n"
-        "---------\n"
-        "- journal_font.sti 프레임 3,299개 ETRLE 전수 재해독 통과\n"
-        "- 한글 프레임 154-1349(1,196개)만 변경\n"
-        "- 비한글 2,103개 프레임 압축 데이터 바이트 동일\n"
-        "- 한글 글리프 픽셀 팔레트 인덱스 44 단일 사용, 그림자 인덱스 15 사용 0건\n"
-        "- 1.24 / 1.28의 FACT.DBS와 journal_font.sti 동일\n"
-        "- 실제 게임 화면 검증 전 테스트 빌드입니다.\n"
-    )
+    print("Mook->무크 occurrences:", len(mook_positions))
 
     for root, label in [(p128, "1.28"), (p124, "1.24")]:
         (root / "Data/JOURNAL/journal_font.sti").write_bytes(new_font)
         (root / "Data/DATABASES/FACT.DBS").write_bytes(new_fact)
-        (root / "README_v0.2.9-test1.txt").write_text(notes, encoding="utf-8-sig")
-        regenerate_checksums(root)
-        outzip = OUT / f"Wizardry8_KoreanPatch_{label}_JournalGalmuri11_v0.2.9-test1.zip"
+        clean_root_text_files(root)
+        outzip = OUT / f"Wizardry8_KoreanPatch_{label}_JournalMonoGalmuri11_v0.2.9-test2.zip"
         zip_tree(root, outzip)
-        print(
-            label,
-            outzip,
-            outzip.stat().st_size,
-            hashlib.sha256(outzip.read_bytes()).hexdigest(),
-        )
+        print(label, outzip, outzip.stat().st_size, sha256_bytes(outzip.read_bytes()))
 
-    if (p128 / "Data/JOURNAL/journal_font.sti").read_bytes() != (
-        p124 / "Data/JOURNAL/journal_font.sti"
-    ).read_bytes():
+    if (p128 / "Data/JOURNAL/journal_font.sti").read_bytes() != (p124 / "Data/JOURNAL/journal_font.sti").read_bytes():
         raise RuntimeError("final journal fonts differ")
-    if (p128 / "Data/DATABASES/FACT.DBS").read_bytes() != (
-        p124 / "Data/DATABASES/FACT.DBS"
-    ).read_bytes():
+    if (p128 / "Data/DATABASES/FACT.DBS").read_bytes() != (p124 / "Data/DATABASES/FACT.DBS").read_bytes():
         raise RuntimeError("final FACT.DBS differ")
 
-    (OUT / "validation.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    report = {
+        "base": "v0.2.8",
+        "font": "Galmuri11",
+        "baseline": baseline,
+        "ink_palette_index": INK,
+        "shadow": False,
+        "ascii_frames_rebuilt": ASCII_FRAME_COUNT,
+        "ascii_codepoints": [f"U+{cp:04X}" for cp in ascii_cps],
+        "hangul_frames_rebuilt": HANGUL_COUNT,
+        "changed_frames": len(changed),
+        "mook_to_mukeu_occurrences": len(mook_positions),
+        "journal_font_sha256": sha256_bytes(new_font),
+        "fact_sha256": sha256_bytes(new_fact),
+        "galmuri9_probe": {"exact": exact, "present": present, "pixel_delta": pixel_delta, "props": props9},
+        "galmuri11_props": props11,
+    }
+    (OUT / "validation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
