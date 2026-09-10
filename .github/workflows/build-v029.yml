@@ -35,6 +35,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Galmuri11 Hangul BBX height is 11px, while a small subset has 10px visual width.
+          # Preserve each glyph's real bitmap width and center it inside the existing 13px STI frame.
+          sed -i "s/if (gw, gh) != (11, 11):/if gh != 11 or gw > 11:/" tools/build_v029.py
           python3 tools/build_v029.py --bdf /tmp/Galmuri11.bdf --root124 work/p124 --root128 work/p128
 
       - name: Pack v0.2.9 archives
