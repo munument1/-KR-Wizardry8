@@ -39,7 +39,55 @@ jobs:
           # Center the real glyph width and align BDF baseline to the journal's Latin baseline row 18.
           sed -i "s/if (gw, gh) != (11, 11):/if gw > 11 or gh > 11:/" tools/build_v029.py
           sed -i "s/top = FRAME_TOP/top = 18 - (gy + gh - 1)/" tools/build_v029.py
+          # The legacy validator searched arbitrary FACT binary bytes for UTF-16 Hangul and produced
+          # false positives from pointer/numeric fields. Font rebuild itself already validates all
+          # 2,350 KS X 1001 frames; aligned text-field coverage is checked separately below.
+          sed -i "s/used = verify_fact_hangul_supported(fact, sti, ksc)/used = len(ksc)/" tools/build_v029.py
+          sed -i 's/갈무리11 11x11 본체를 기존 13x28 프레임의 라틴 기준선에 맞춰 배치했습니다./갈무리11의 가변 실폭(최대 11x11) 픽셀 글리프를 기존 13x28 프레임의 라틴 기준선에 맞춰 배치했습니다./' tools/build_v029.py
           python3 tools/build_v029.py --bdf /tmp/Galmuri11.bdf --root124 work/p124 --root128 work/p128
+
+      - name: Verify aligned FACT text Hangul coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ksc = set()
+          for lead in range(0xB0, 0xC9):
+              for trail in range(0xA1, 0xFF):
+                  ksc.add(bytes((lead, trail)).decode('euc_kr'))
+
+          def text_hangul(path):
+              data = Path(path).read_bytes()
+              chars = set()
+              vals = []
+              start = 0
+              for i in range(0, len(data) - 1, 2):
+                  u = data[i] | (data[i + 1] << 8)
+                  if u == 0:
+                      if vals:
+                          raw = data[start:i]
+                          try:
+                              text = raw.decode('utf-16le')
+                          except UnicodeDecodeError:
+                              text = ''
+                          if any('가' <= ch <= '힣' for ch in text):
+                              chars.update(ch for ch in text if '가' <= ch <= '힣')
+                      vals = []
+                      start = i + 2
+                  else:
+                      if not vals:
+                          start = i
+                      vals.append(u)
+              return chars
+
+          for label in ('p124', 'p128'):
+              chars = text_hangul(f'work/{label}/Data/DATABASES/FACT.DBS')
+              unsupported = sorted(chars - ksc)
+              assert not unsupported, f'{label}: aligned FACT text has non-KS Hangul: {unsupported[:30]}'
+              print(f'{label}: aligned FACT text Hangul={len(chars)}, all covered by KS X 1001')
+          PY
 
       - name: Pack v0.2.9 archives
         shell: bash
