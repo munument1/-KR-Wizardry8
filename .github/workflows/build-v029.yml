@@ -1,0 +1,56 @@
+name: Build v0.2.9 journal fix
+
+on:
+  push:
+    branches:
+      - build-v0.2.9
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Download v0.2.8 bases and Galmuri11
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/p124 work/p128 out
+          curl -fL --retry 3 -o /tmp/p124.zip 'https://github.com/munument1/-KR-Wizardry8/releases/download/0.2.8%281.24%29/Wizardry8_KoreanPatch_1.24_JournalFix_v0.2.8.zip'
+          curl -fL --retry 3 -o /tmp/p128.zip 'https://github.com/munument1/-KR-Wizardry8/releases/download/v0.2.8/Wizardry8_KoreanPatch_1.28_JournalFix_v0.2.8.zip'
+          curl -fL --retry 3 -o /tmp/Galmuri11.bdf 'https://raw.githubusercontent.com/quiple/galmuri/main/dist/Galmuri11.bdf'
+          unzip -q /tmp/p124.zip -d work/p124
+          unzip -q /tmp/p128.zip -d work/p128
+          test -f work/p124/Data/DATABASES/FACT.DBS
+          test -f work/p128/Data/DATABASES/FACT.DBS
+          test -f work/p124/Data/JOURNAL/journal_font.sti
+          test -f work/p128/Data/JOURNAL/journal_font.sti
+
+      - name: Rebuild journal data and font
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/build_v029.py --bdf /tmp/Galmuri11.bdf --root124 work/p124 --root128 work/p128
+
+      - name: Pack v0.2.9 archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd work/p124 && zip -qr ../../out/Wizardry8_KoreanPatch_1.24_JournalFix_v0.2.9.zip .)
+          (cd work/p128 && zip -qr ../../out/Wizardry8_KoreanPatch_1.28_JournalFix_v0.2.9.zip .)
+          unzip -t out/Wizardry8_KoreanPatch_1.24_JournalFix_v0.2.9.zip
+          unzip -t out/Wizardry8_KoreanPatch_1.28_JournalFix_v0.2.9.zip
+          sha256sum out/*.zip | tee out/ZIP_SHA256SUMS.txt
+
+      - name: Upload v0.2.9 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wizardry8_KoreanPatch_v0.2.9
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
