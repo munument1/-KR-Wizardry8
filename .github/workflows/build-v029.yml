@@ -44,6 +44,18 @@ jobs:
           # 2,350 KS X 1001 frames; aligned text-field coverage is checked separately below.
           sed -i "s/used = verify_fact_hangul_supported(fact, sti, ksc)/used = len(ksc)/" tools/build_v029.py
           sed -i 's/갈무리11 11x11 본체를 기존 13x28 프레임의 라틴 기준선에 맞춰 배치했습니다./갈무리11의 가변 실폭(최대 11x11) 픽셀 글리프를 기존 13x28 프레임의 라틴 기준선에 맞춰 배치했습니다./' tools/build_v029.py
+          # Some legacy package filenames are represented through Python surrogateescape after unzip.
+          # Preserve those raw filename bytes in the checksum manifest instead of requiring valid UTF-8.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/build_v029.py')
+          s = p.read_text()
+          old = "(root / 'SHA256SUMS.txt').write_text('\\n'.join(lines) + '\\n', encoding='utf-8')"
+          new = "(root / 'SHA256SUMS.txt').write_bytes(('\\n'.join(lines) + '\\n').encode('utf-8', errors='surrogateescape'))"
+          if old not in s:
+              raise SystemExit('checksum writer pattern not found')
+          p.write_text(s.replace(old, new))
+          PY
           python3 tools/build_v029.py --bdf /tmp/Galmuri11.bdf --root124 work/p124 --root128 work/p128
 
       - name: Verify aligned FACT text Hangul coverage
