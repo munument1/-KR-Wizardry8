@@ -1,0 +1,36 @@
+name: Build Galmuri11 journal test v2
+
+on:
+  push:
+    branches:
+      - tmp/galmuri11-journal-fix
+    paths:
+      - tools/build_galmuri11_journal_test.py
+      - .github/workflows/build-galmuri11-journal-test-v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download base patches and Galmuri BDFs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p work
+          curl -fL --retry 3 -o work/base128.zip 'https://github.com/munument1/-KR-Wizardry8/releases/download/v0.2.8/Wizardry8_KoreanPatch_1.28_JournalFix_v0.2.8.zip'
+          curl -fL --retry 3 -o work/base124.zip 'https://github.com/munument1/-KR-Wizardry8/releases/download/0.2.8%281.24%29/Wizardry8_KoreanPatch_1.24_JournalFix_v0.2.8.zip'
+          curl -fL --retry 3 -o work/Galmuri9.bdf 'https://raw.githubusercontent.com/quiple/galmuri/main/dist/Galmuri9.bdf'
+          curl -fL --retry 3 -o work/Galmuri11.bdf 'https://raw.githubusercontent.com/quiple/galmuri/main/dist/Galmuri11.bdf'
+      - name: Build and validate
+        run: python3 tools/build_galmuri11_journal_test.py
+      - name: Upload test patches
+        uses: actions/upload-artifact@v4
+        with:
+          name: wizardry8-galmuri11-journal-v0.2.9-test1
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
